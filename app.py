@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
+import urllib.request
 import wave
 from pathlib import Path
+
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 import cv2
 import mediapipe as mp
 import pygame
+from mediapipe.tasks.python.core import base_options as base_options_module
+from mediapipe.tasks.python.vision import face_landmarker
+from mediapipe.tasks.python.vision.core import vision_task_running_mode as running_mode_module
 
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SOUND_PATH = ROOT / "assets" / "mouth_open.wav"
+DEFAULT_MODEL_PATH = ROOT / "assets" / "face_landmarker.task"
+FACE_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
@@ -48,6 +57,15 @@ def ensure_default_sound(path: Path) -> None:
             frames.extend(value.to_bytes(2, byteorder="little", signed=True))
 
         wav_file.writeframes(bytes(frames))
+
+
+def ensure_face_model(path: Path) -> None:
+    if path.exists():
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading MediaPipe face model to {path}...")
+    urllib.request.urlretrieve(FACE_LANDMARKER_MODEL_URL, path)
 
 
 def landmark_point(landmarks, index: int, width: int, height: int) -> tuple[int, int]:
@@ -87,17 +105,24 @@ def init_sound(sound_path: Path) -> pygame.mixer.Sound | None:
         return None
 
 
-def run_app(camera_index: int, sound_path: Path, threshold: float, cooldown: float) -> int:
-    ensure_default_sound(sound_path)
-    sound = init_sound(sound_path)
-
-    face_mesh = mp.solutions.face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.5,
+def create_face_landmarker(model_path: Path) -> face_landmarker.FaceLandmarker:
+    base_options = base_options_module.BaseOptions(model_asset_path=str(model_path))
+    options = face_landmarker.FaceLandmarkerOptions(
+        base_options=base_options,
+        running_mode=running_mode_module.VisionTaskRunningMode.VIDEO,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    return face_landmarker.FaceLandmarker.create_from_options(options)
+
+
+def run_app(camera_index: int, sound_path: Path, model_path: Path, threshold: float, cooldown: float) -> int:
+    ensure_default_sound(sound_path)
+    ensure_face_model(model_path)
+    sound = init_sound(sound_path)
+    landmarker = create_face_landmarker(model_path)
 
     capture = cv2.VideoCapture(camera_index)
     if not capture.isOpened():
@@ -117,13 +142,14 @@ def run_app(camera_index: int, sound_path: Path, threshold: float, cooldown: flo
             frame = cv2.flip(frame, 1)
             height, width = frame.shape[:2]
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb_frame)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            results = landmarker.detect_for_video(mp_image, int(time.monotonic() * 1000))
 
             status = "No face"
             status_color = (180, 180, 180)
 
-            if results.multi_face_landmarks:
-                landmarks = results.multi_face_landmarks[0].landmark
+            if results.face_landmarks:
+                landmarks = results.face_landmarks[0]
                 ratio = mouth_open_ratio(landmarks, width, height)
                 is_open = ratio >= threshold
 
@@ -152,7 +178,7 @@ def run_app(camera_index: int, sound_path: Path, threshold: float, cooldown: flo
                 return 0
     finally:
         capture.release()
-        face_mesh.close()
+        landmarker.close()
         pygame.mixer.quit()
         cv2.destroyAllWindows()
 
@@ -161,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Track eyes and mouth with a webcam, and play a sound when the mouth opens.")
     parser.add_argument("--camera", type=int, default=0, help="Camera index to open. Default: 0")
     parser.add_argument("--sound", type=Path, default=DEFAULT_SOUND_PATH, help="WAV sound to play when the mouth opens.")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="MediaPipe face landmarker .task model path.")
     parser.add_argument("--threshold", type=float, default=0.34, help="Mouth-open ratio threshold. Default: 0.34")
     parser.add_argument("--cooldown", type=float, default=0.8, help="Minimum seconds between sound plays. Default: 0.8")
     return parser.parse_args()
@@ -168,4 +195,4 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    raise SystemExit(run_app(args.camera, args.sound, args.threshold, args.cooldown))
+    raise SystemExit(run_app(args.camera, args.sound, args.model, args.threshold, args.cooldown))

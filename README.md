@@ -32,4 +32,4 @@ python app.py --threshold 0.30
 python app.py --camera 1 --cooldown 1.2
 ```
 
-The default sound is generated automatically at `assets/mouth_open.wav` on first run.
+The default sound is generated automatically at `assets/mouth_open.wav` on first run. The MediaPipe face model is also downloaded automatically to `assets/face_landmarker.task` the first time the app starts.
