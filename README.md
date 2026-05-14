@@ -1,6 +1,6 @@
 # FacePy
 
-FacePy is a small Python webcam app that tracks a face with MediaPipe Face Mesh, draws line contours around the eyes and mouth, and plays a sound when the mouth opens wide.
+FacePy is a small Python webcam app that tracks a face with MediaPipe Face Mesh, draws line contours around the eyes and mouth, and randomly plays a WAV sound when the mouth opens wide.
 
 ## Setup
 
@@ -24,12 +24,14 @@ Controls:
 - Press `Q` or `Esc` to quit.
 - If you have multiple cameras, try `python app.py --camera 1`.
 - If the sound fires too easily or too rarely, adjust `--threshold`; lower values are more sensitive.
+- Put `.wav` files in `assets` to include them in the random mouth-open sound pool.
 
 Examples:
 
 ```powershell
 python app.py --threshold 0.30
 python app.py --camera 1 --cooldown 1.2
+python app.py --sound assets\mixkit-sweet-kitty-meow-93.wav
 ```
 
-The default sound is generated automatically at `assets/mouth_open.wav` on first run. The MediaPipe face model is also downloaded automatically to `assets/face_landmarker.task` the first time the app starts.
+By default, FacePy loads every `.wav` file in `assets` and picks one at random each time the mouth-open trigger fires. If no WAV files are found, a fallback sound is generated automatically at `assets/mouth_open.wav`. The MediaPipe face model is also downloaded automatically to `assets/face_landmarker.task` the first time the app starts.

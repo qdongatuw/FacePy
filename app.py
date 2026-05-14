@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import random
 import time
 import urllib.request
 import wave
@@ -20,6 +21,7 @@ from mediapipe.tasks.python.vision.core import vision_task_running_mode as runni
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SOUND_PATH = ROOT / "assets" / "mouth_open.wav"
+DEFAULT_SOUND_DIR = ROOT / "assets"
 DEFAULT_MODEL_PATH = ROOT / "assets" / "face_landmarker.task"
 FACE_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 
@@ -96,13 +98,66 @@ def draw_polyline(frame, landmarks, indices: list[int], color: tuple[int, int, i
         cv2.line(frame, points[-1], points[0], color, 2, cv2.LINE_AA)
 
 
-def init_sound(sound_path: Path) -> pygame.mixer.Sound | None:
+def discover_sound_paths(sound_path: Path) -> list[Path]:
+    if sound_path.is_dir():
+        return sorted(sound_path.glob("*.wav"))
+    return [sound_path]
+
+
+def init_sounds(sound_path: Path) -> list[tuple[Path, pygame.mixer.Sound]]:
+    sound_paths = discover_sound_paths(sound_path)
+    if not sound_paths:
+        ensure_default_sound(DEFAULT_SOUND_PATH)
+        sound_paths = [DEFAULT_SOUND_PATH]
+
     try:
         pygame.mixer.init()
-        return pygame.mixer.Sound(str(sound_path))
     except pygame.error as exc:
         print(f"Warning: sound disabled because pygame mixer failed to initialize: {exc}")
-        return None
+        return []
+
+    sounds: list[tuple[Path, pygame.mixer.Sound]] = []
+    for path in sound_paths:
+        try:
+            sounds.append((path, pygame.mixer.Sound(str(path))))
+        except pygame.error as exc:
+            print(f"Warning: could not load sound {path}: {exc}")
+
+    if not sounds and sound_path != DEFAULT_SOUND_PATH:
+        ensure_default_sound(DEFAULT_SOUND_PATH)
+        try:
+            sounds.append((DEFAULT_SOUND_PATH, pygame.mixer.Sound(str(DEFAULT_SOUND_PATH))))
+        except pygame.error as exc:
+            print(f"Warning: could not load fallback sound {DEFAULT_SOUND_PATH}: {exc}")
+
+    return sounds
+
+
+def draw_sound_burst(frame, center: tuple[int, int], age: float, label: str) -> None:
+    height, width = frame.shape[:2]
+    progress = min(max(age / 0.55, 0.0), 1.0)
+    alpha = 1.0 - progress
+    overlay = frame.copy()
+    palette = [(255, 190, 70), (80, 220, 255), (80, 120, 255), (120, 255, 120)]
+    radius = int(24 + 70 * progress)
+
+    for index, color in enumerate(palette):
+        angle = progress * math.tau + index * math.tau / len(palette)
+        end = (
+            int(center[0] + math.cos(angle) * radius),
+            int(center[1] + math.sin(angle) * radius),
+        )
+        cv2.line(overlay, center, end, color, 3, cv2.LINE_AA)
+        cv2.circle(overlay, end, max(4, int(10 * alpha)), color, -1, cv2.LINE_AA)
+
+    cv2.circle(overlay, center, radius, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.35 * alpha, frame, 1.0 - 0.35 * alpha, 0, frame)
+
+    text = f"Sound: {label}"
+    (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+    x = max(16, min(center[0] - text_width // 2, width - text_width - 16))
+    y = min(height - 64, max(72, center[1] - radius - 18))
+    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def create_face_landmarker(model_path: Path) -> face_landmarker.FaceLandmarker:
@@ -119,9 +174,10 @@ def create_face_landmarker(model_path: Path) -> face_landmarker.FaceLandmarker:
 
 
 def run_app(camera_index: int, sound_path: Path, model_path: Path, threshold: float, cooldown: float) -> int:
-    ensure_default_sound(sound_path)
+    if sound_path == DEFAULT_SOUND_PATH:
+        sound_path = DEFAULT_SOUND_DIR
     ensure_face_model(model_path)
-    sound = init_sound(sound_path)
+    sounds = init_sounds(sound_path)
     landmarker = create_face_landmarker(model_path)
 
     capture = cv2.VideoCapture(camera_index)
@@ -130,6 +186,8 @@ def run_app(camera_index: int, sound_path: Path, model_path: Path, threshold: fl
         return 1
 
     last_played_at = 0.0
+    last_sound_name = ""
+    last_sound_center = (0, 0)
     window_name = "FacePy - press Q or Esc to quit"
 
     try:
@@ -161,15 +219,24 @@ def run_app(camera_index: int, sound_path: Path, model_path: Path, threshold: fl
                 draw_polyline(frame, landmarks, OUTER_MOUTH, mouth_color)
                 draw_polyline(frame, landmarks, INNER_MOUTH, mouth_color)
 
+                mouth_center = landmark_point(landmarks, UPPER_LIP, width, height)
                 status = f"Mouth ratio: {ratio:.2f} / threshold: {threshold:.2f}"
                 status_color = mouth_color
 
                 now = time.monotonic()
-                if is_open and sound and now - last_played_at >= cooldown:
+                if is_open and sounds and now - last_played_at >= cooldown:
+                    sound_path, sound = random.choice(sounds)
                     sound.play()
                     last_played_at = now
+                    last_sound_name = sound_path.stem.replace("mixkit-", "").replace("-", " ")
+                    last_sound_center = mouth_center
+
+            burst_age = time.monotonic() - last_played_at
+            if last_sound_name and burst_age < 0.55:
+                draw_sound_burst(frame, last_sound_center, burst_age, last_sound_name)
 
             cv2.putText(frame, status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2, cv2.LINE_AA)
+            cv2.putText(frame, f"{len(sounds)} sounds loaded", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (210, 210, 210), 2, cv2.LINE_AA)
             cv2.putText(frame, "Press Q or Esc to quit", (20, height - 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (230, 230, 230), 2, cv2.LINE_AA)
             cv2.imshow(window_name, frame)
 
@@ -186,7 +253,7 @@ def run_app(camera_index: int, sound_path: Path, model_path: Path, threshold: fl
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Track eyes and mouth with a webcam, and play a sound when the mouth opens.")
     parser.add_argument("--camera", type=int, default=0, help="Camera index to open. Default: 0")
-    parser.add_argument("--sound", type=Path, default=DEFAULT_SOUND_PATH, help="WAV sound to play when the mouth opens.")
+    parser.add_argument("--sound", type=Path, default=DEFAULT_SOUND_DIR, help="WAV file or directory of WAV files to randomly play when the mouth opens.")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="MediaPipe face landmarker .task model path.")
     parser.add_argument("--threshold", type=float, default=0.34, help="Mouth-open ratio threshold. Default: 0.34")
     parser.add_argument("--cooldown", type=float, default=0.8, help="Minimum seconds between sound plays. Default: 0.8")
